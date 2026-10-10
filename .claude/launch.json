@@ -1,0 +1,6 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    { "name": "game", "runtimeExecutable": "npx", "runtimeArgs": ["wrangler", "dev", "-c", "wrangler.dev.jsonc", "--port", "8787", "--ip", "127.0.0.1"], "port": 8787 }
+  ]
+}

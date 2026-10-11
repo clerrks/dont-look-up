@@ -102,7 +102,7 @@ export class Tour {
       this.pendingAdvance = window.setTimeout(() => { this.root.classList.remove('lite'); this.next(); }, 3600);
       return;
     }
-    this.pendingAdvance = window.setTimeout(() => this.next(), kind === 'step' ? 700 : 650);
+    this.pendingAdvance = window.setTimeout(() => this.next(), kind === 'step' ? (audio.enabled ? 4500 : 1400) : 650); // let "See how the lines narrow" finish before the next voice cuts in
   }
 
   private finish() {

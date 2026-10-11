@@ -700,3 +700,10 @@ dialog.sound-notice .in { gap: 14px; }
 .ld-msg { margin: 0; font: 400 13px var(--font-data); color: var(--text-3); }
 .ld-tip { margin: 6px 0 0; min-height: 3.2em; font: 400 14px/1.45 var(--font-ui); color: var(--text-2); text-wrap: balance; opacity: 0; transform: translateY(4px); transition: opacity 0.25s var(--ease), transform 0.25s var(--ease); }
 .ld-tip.in { opacity: 1; transform: none; }
+
+/* trailer */
+.trailer-btn { align-self: flex-start; display: inline-flex; align-items: center; gap: 8px; margin-top: 4px; }
+dialog.trailer { width: min(1100px, calc(100vw - 24px)); max-width: none; background: #000; border-color: var(--line-soft); overflow: hidden; }
+dialog.trailer .in { padding: 0; gap: 0; position: relative; max-height: none; overflow: hidden; }
+dialog.trailer video { display: block; width: 100%; aspect-ratio: 16 / 9; background: #000; }
+dialog.trailer [data-close] { position: absolute; top: 10px; right: 10px; background: oklch(0.16 0.02 262 / 0.75); }

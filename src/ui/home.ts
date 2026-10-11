@@ -1,3 +1,4 @@
+import { openTrailer } from './trailer';
 import { fetchBoard, fetchCatalog, fetchUpcoming, fetchWeek, type Board, type Detail, type UpcomingObject, type WeekObject } from '../api';
 import { DAILY_BUDGET_B, dailyScenario, msUntilReset, todayUTC } from '../daily';
 import { DIFFICULTY, type Difficulty } from '../game';
@@ -80,6 +81,7 @@ export async function renderHome(deps: HomeDeps) {
       <header>
         <h1><img class="logo" src="/asteroid-icon.png" alt="" width="56" height="56" />Don't Look Up</h1>
         <p class="lede">A killer asteroid is coming towards Earth. Find where it lands, and stop it.</p>
+        <button type="button" class="btn trailer-btn" id="trailer"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 2.5v11l9-5.5z" fill="currentColor"/></svg>Watch the trailer</button>
         <span class="home-snd"></span>
       </header>
 
@@ -126,6 +128,7 @@ export async function renderHome(deps: HomeDeps) {
     </div>`;
 
   panel.querySelector('.home-snd')!.append(audio.button());
+  panel.querySelector('#trailer')!.addEventListener('click', openTrailer);
 
   // ---------------------------------------------------------------- daily challenge
   const boardEl = panel.querySelector<HTMLElement>('#daily-board')!;

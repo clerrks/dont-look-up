@@ -10,7 +10,6 @@ export const V_ESC = 11.186; // km/s
 export const D2R = Math.PI / 180;
 const SEC_PER_YEAR = 365.25 * 86400;
 const MT_J = 4.184e15;
-const SHAPE_P = 2.8; // how fast the uncertainty collapses as the arc grows
 export const SAMPLES = 4200;
 
 export interface Scenario {
@@ -35,6 +34,7 @@ export interface Scenario {
   radiant: { lat: number; lon: number; theta: number };
   beta: number; // momentum enhancement factor (unknown to the player)
   geom: number; // along-track to b-plane geometry factor
+  shapeP: number; // how fast the uncertainty collapses as observations accumulate
   cruiseYears: number;
   seed: number;
   orbit?: Elements;
@@ -43,6 +43,8 @@ export interface Scenario {
   difficulty: 'easy' | 'standard' | 'hard';
   startISO: string;
   budgetB: number;
+  /** set for the daily challenge: the date it belongs to */
+  daily?: string;
 }
 
 export type KineticTier = 'light' | 'standard' | 'heavy';
@@ -55,14 +57,26 @@ export const TRACTOR = { massKg: 30000, costB: 1.4, label: 'Gravity tractor' };
 export const OBS = {
   ground: { label: 'Ground survey push', costB: 0.12, bonusYears: 0.3, durYears: 0.25 },
   space: { label: 'Space telescope time', costB: 0.45, bonusYears: 0.8, durYears: 0.5 },
+  /** radar only reaches an asteroid that is already fairly close, so it opens late */
+  radar: { label: 'Radar imaging', costB: 0.22, bonusYears: 0.9, durYears: 0.3 },
 };
+export type ObsKind = keyof typeof OBS;
+/** Radar can only be bought when the asteroid is this close to impact (years). */
+export const RADAR_WINDOW_YEARS = 3.6;
+/** A small spacecraft that flies alongside, weighs the asteroid and tracks it precisely: better orbit, and the push becomes predictable. */
+export const PROBE = { label: 'Rendezvous probe', costB: 0.35, bonusYears: 0.5, durYears: 0.25, cruiseFactor: 0.85 };
 export const EVAC_COST_B = 0.04;
+/** Shelters keep working late, but they only save part of the people in a blast zone. */
+export const SHELTER_COST_B = 0.09;
+export const SHELTER_MAX = 0.4;
+/** A nuclear device detonated beside the asteroid: it breaks into pieces. Expensive, fast, and a very last resort. */
+export const NUKE = { label: 'Nuclear burst', costB: 2.0, cruiseFactor: 0.6 };
 export const MAX_OBS_BONUS = 2.0;
 export const IMPACTOR_SPEED_KMS = 6.1;
 
 export interface Decision {
   id: string;
-  kind: 'obs' | 'kinetic' | 'tractor' | 'evac';
+  kind: 'obs' | 'kinetic' | 'tractor' | 'evac' | 'nuke' | 'probe';
   t: number; // game time of the order, years
   costB: number;
   label: string;
@@ -75,8 +89,11 @@ export interface Decision {
   // tractor
   arriveT?: number;
   endT?: number;
-  // evac
+  // nuclear burst
+  detonateT?: number;
+  // evac (or shelters)
   cityId?: string;
+  mode?: 'evac' | 'shelter';
 }
 
 export interface Applied {
@@ -87,6 +104,8 @@ export interface Applied {
   fullR: number; // actual displacement at impact (Earth radii) when complete
   nominalR: number; // what the team *predicts* (nominal beta)
   tractor?: { a: number; t0: number; t1: number };
+  /** the tractor was hovering next to the asteroid when an impactor struck: the debris destroyed it */
+  destroyedAt?: number;
   measuredAt: number;
 }
 
@@ -106,17 +125,21 @@ export function bImpactRadius(vInf: number) {
 function obsBonus(decs: Decision[], t: number): number {
   let b = 0;
   for (const d of decs) {
-    if (d.kind !== 'obs') continue;
-    const f = Math.max(0, Math.min(1, (t - d.t) / (d.durYears ?? 0.25)));
-    b += (d.bonusYears ?? 0) * f;
+    if (d.kind === 'obs') {
+      const f = Math.max(0, Math.min(1, (t - d.t) / (d.durYears ?? 0.25)));
+      b += (d.bonusYears ?? 0) * f;
+    } else if (d.kind === 'probe') {
+      const f = Math.max(0, Math.min(1, (t - d.arriveT!) / (d.durYears ?? 0.25)));
+      b += (d.bonusYears ?? 0) * f;
+    }
   }
-  return Math.min(MAX_OBS_BONUS, b);
+  return Math.min(MAX_OBS_BONUS + 0.5, b);
 }
 
 /** Fraction of the original uncertainty that remains at game time t. */
 export function remaining(sc: Scenario, decs: Decision[], t: number): number {
   const s = Math.min(t + obsBonus(decs, t), sc.leadYears - 0.004);
-  return Math.pow(Math.max(0, 1 - s / sc.leadYears), SHAPE_P);
+  return Math.pow(Math.max(0, 1 - s / sc.leadYears), sc.shapeP);
 }
 
 function sigmaAt(sc: Scenario, f: number) {
@@ -144,6 +167,11 @@ function tractorDisplacementR(sc: Scenario, a: number, t0: number, t1: number, t
 }
 
 export const NOMINAL_BETA = 2.0;
+
+/** Has a probe reached the asteroid by time t? */
+export function betaKnownBy(decs: Decision[], t: number): boolean {
+  return decs.some((d) => d.kind === 'probe' && d.arriveT! <= t + 1e-9);
+}
 
 function errScaleVec(sc: Scenario, f: number) {
   return { xi: (sc.est0.xi - sc.truth0.xi) * f, zeta: (sc.est0.zeta - sc.truth0.zeta) * f, tau: (sc.est0.tau - sc.truth0.tau) * f };
@@ -173,6 +201,8 @@ function estimateAt(sc: Scenario, decs: Decision[], applied: Applied[], t: numbe
     zeta += a.dir[1] * (a.nominalR - a.fullR);
     extra += 0.35 * Math.abs(a.fullR);
   }
+  // a broken-up asteroid scatters: nobody can say where each piece goes
+  for (const d of decs) if (d.kind === 'nuke' && t >= d.detonateT!) extra += 0.55 * sc.bImp;
   return { xi, zeta, tau: sc.truth0.tau + err.tau, extra };
 }
 
@@ -184,21 +214,29 @@ export function computeApplied(sc: Scenario, decs: Decision[]): Applied[] {
   const applied: Applied[] = [];
   for (const { d, t0 } of mobile) {
     // a tractor can re-point as the orbit firms up; model that by steering with the estimate 60% of the way through the tow
-    const tSteer = d.kind === 'tractor' ? t0 + 0.6 * (d.endT! - t0) : t0;
+    const tSteer = d.kind !== 'kinetic' ? t0 + 0.6 * (d.endT! - t0) : t0;
     const est = estimateAt(sc, decs, applied, tSteer);
     const dir = unit(est.xi, est.zeta);
     if (d.kind === 'kinetic') {
       const m = KINETIC[d.tier!].massKg;
+      // a probe that got there first has weighed the rock: the team then knows what the push will really be
+      const known = betaKnownBy(decs, t0);
       applied.push({
         id: d.id, kind: 'kinetic', t0, dir,
         fullR: deflectionR(sc, m, sc.beta, sc.leadYears - t0),
-        nominalR: deflectionR(sc, m, NOMINAL_BETA, sc.leadYears - t0),
-        measuredAt: t0 + 0.15,
+        nominalR: deflectionR(sc, m, known ? sc.beta : NOMINAL_BETA, sc.leadYears - t0),
+        measuredAt: known ? t0 : t0 + 0.15,
       });
     } else {
       const a = tractorAccel(sc, TRACTOR.massKg);
       applied.push({ id: d.id, kind: 'tractor', t0, dir, fullR: 0, nominalR: 0, tractor: { a, t0, t1: d.endT! }, measuredAt: t0 });
     }
+  }
+  // An impactor that strikes while a tractor is hovering at the asteroid destroys it: its pull stops there.
+  for (const a of applied) {
+    if (a.kind !== 'tractor' || !a.tractor) continue;
+    const hit = applied.filter((k) => k.kind === 'kinetic' && k.t0 >= a.tractor!.t0 && k.t0 < a.tractor!.t1).sort((x, y) => x.t0 - y.t0)[0];
+    if (hit) { a.tractor.t1 = hit.t0; a.destroyedAt = hit.t0; }
   }
   return applied;
 }
@@ -292,11 +330,18 @@ export function hitProbability(mx: number, mz: number, sx: number, sz: number, b
   return Math.max(0, Math.min(1, P));
 }
 
-export function evaluate(sc: Scenario, decs: Decision[], t: number, applied?: Applied[]): Corridor {
+export interface Preview {
+  sigmaScale?: number; // multiply the current uncertainty
+  shift?: [number, number]; // move the centre of the estimate (Earth radii)
+}
+
+export function evaluate(sc: Scenario, decs: Decision[], t: number, applied?: Applied[], preview?: Preview): Corridor {
   const ap = applied ?? computeApplied(sc, decs);
   const f = remaining(sc, decs, t);
   const est = estimateAt(sc, decs, ap, t);
   const sg = sigmaAt(sc, f);
+  if (preview?.sigmaScale !== undefined) { sg.xi *= preview.sigmaScale; sg.zeta *= preview.sigmaScale; sg.tau *= preview.sigmaScale; }
+  if (preview?.shift) { est.xi += preview.shift[0]; est.zeta += preview.shift[1]; }
   const sXi = Math.hypot(sg.xi, est.extra * 0.6);
   const sZeta = Math.hypot(sg.zeta, est.extra);
   const peak = 1 / (2 * Math.PI * sXi * sZeta);
@@ -304,29 +349,27 @@ export function evaluate(sc: Scenario, decs: Decision[], t: number, applied?: Ap
   const lat = new Float32Array(SAMPLES), lon = new Float32Array(SAMPLES), alpha = new Float32Array(SAMPLES);
   const P = hitProbability(est.xi, est.zeta, sXi, sZeta, sc.bImp);
   const area = (Math.PI * sc.bImp * sc.bImp) / SAMPLES;
-  let n = 0, cx = 0, cy = 0, cz = 0, cw = 0;
-  const push = (xi: number, zeta: number, tauH: number, a: number) => {
+  let cx = 0, cy = 0, cz = 0, cw = 0;
+  // every sample keeps its slot, so the picture can morph smoothly from one moment to the next
+  const put = (i: number, xi: number, zeta: number, tauH: number, a: number) => {
     const g = groundPoint(sc, xi, zeta, tauH);
-    lat[n] = g.lat; lon[n] = g.lon; alpha[n] = Math.min(1, a);
-    const la = g.lat * D2R, lo = g.lon * D2R;
-    cx += Math.cos(la) * Math.cos(lo) * a; cy += Math.cos(la) * Math.sin(lo) * a; cz += Math.sin(la) * a; cw += a;
-    n++;
+    lat[i] = g.lat; lon[i] = g.lon; alpha[i] = a > 0.015 ? Math.min(1, a) : 0;
+    if (alpha[i] > 0) {
+      const la = g.lat * D2R, lo = g.lon * D2R;
+      cx += Math.cos(la) * Math.cos(lo) * a; cy += Math.cos(la) * Math.sin(lo) * a; cz += Math.sin(la) * a; cw += a;
+    }
   };
   if (Math.max(sXi, sZeta) < 0.6 * sc.bImp) {
     // narrow posterior: the Monte Carlo cloud itself (fixed normals scaled by the current sigma)
     for (let i = 0; i < SAMPLES; i++) {
       const xi = est.xi + d.zx[i] * sXi, zeta = est.zeta + d.zz[i] * sZeta;
-      if (xi * xi + zeta * zeta >= sc.bImp * sc.bImp) continue;
-      push(xi, zeta, est.tau + sg.tau * d.zt[i], 1);
+      put(i, xi, zeta, est.tau + sg.tau * d.zt[i], xi * xi + zeta * zeta >= sc.bImp * sc.bImp ? 0 : 1);
     }
   } else {
     for (let i = 0; i < SAMPLES; i++) {
       const xi = d.u[i] * sc.bImp, zeta = d.v[i] * sc.bImp;
       const dx = (xi - est.xi) / sXi, dz = (zeta - est.zeta) / sZeta;
-      const w = peak * Math.exp(-0.5 * (dx * dx + dz * dz));
-      const a = w / peak;
-      if (a < 0.015) continue;
-      push(xi, zeta, est.tau + sg.tau * d.zt[i], a);
+      put(i, xi, zeta, est.tau + sg.tau * d.zt[i], Math.exp(-0.5 * (dx * dx + dz * dz)));
     }
   }
   void area;
@@ -336,7 +379,7 @@ export function evaluate(sc: Scenario, decs: Decision[], t: number, applied?: Ap
     hitProb: P, applied: ap, truth, weightPeak: peak,
   };
   const centroid = cw > 0 ? { lat: Math.atan2(cz, Math.hypot(cx, cy)) / D2R, lon: Math.atan2(cy, cx) / D2R } : null;
-  return { lat, lon, alpha, count: n, centroid, state };
+  return { lat, lon, alpha, count: SAMPLES, centroid, state };
 }
 
 export interface Effects {
@@ -357,9 +400,10 @@ export function impactEffects(sc: Scenario): Effects {
   // Transient crater scaling (Collins et al. 2005, simplified): density 2500 target, 45 degree impact
   const trans = 1.161 * Math.cbrt(sc.densityKgM3 / 2500) * Math.pow(sc.diameterM, 0.78) * Math.pow(sc.vImpact * 1000, 0.44) * Math.pow(9.81, -0.22) * Math.cbrt(Math.SQRT1_2);
   const craterKm = airburst ? 0 : (trans * 1.25) / 1000;
-  const rB = 4.0 * Y13;
-  const rC = 11 * Y13;
-  const rA = airburst ? 0.5 * rB : Math.max(craterKm * 0.9, 0.35 * rB);
+  // generous zones (about 1.8x the textbook scaling) so a strike on a city is felt
+  const rB = 7.2 * Y13;
+  const rC = 19 * Y13;
+  const rA = airburst ? 0.5 * rB : Math.max(craterKm * 0.9, 0.5 * rB);
   return { energyMt: Mt, craterKm, airburst, rA, rB, rC, tsunamiKm: Math.min(1800, 45 * Y13) };
 }
 
@@ -380,8 +424,16 @@ export interface CityImpact {
   distKm: number;
   zone: 'A' | 'B' | 'C' | 'tsunami' | null;
   exposedM: number; // people in the zone before evacuation
-  deathsM: number; // after evacuation
+  deathsM: number; // after evacuation and shelters
   evac: number;
+  shelter: number;
+}
+
+/** Shelters take about three months to build; before that they only half work. */
+export function shelterFraction(start: number | undefined, leadYears: number): number {
+  if (start === undefined) return 0;
+  const lead = leadYears - start;
+  return SHELTER_MAX * Math.max(0, Math.min(1, (lead - 0.03) / 0.25));
 }
 
 export function cityRadiusKm(city: City): number {
@@ -405,9 +457,12 @@ export function cityImpacts(
   site: { lat: number; lon: number },
   isLand: (lat: number, lon: number) => boolean,
   evacStart: Map<string, number>,
+  shelterStart: Map<string, number> = new Map(),
 ): { rows: CityImpact[]; deathsM: number; exposedM: number; ocean: boolean } {
   const fx = impactEffects(sc);
-  const ocean = !isLand(site.lat, site.lon);
+  // a coastal city's centre can sit on an ocean pixel of the coarse map: count a strike near any city as land
+  const nearCity = CITIES.some((c) => haversineKm(site.lat, site.lon, c.lat, c.lon) < 70);
+  const ocean = !isLand(site.lat, site.lon) && !nearCity;
   const rows: CityImpact[] = [];
   let deaths = 0, exposed = 0;
   for (const city of CITIES) {
@@ -426,16 +481,25 @@ export function cityImpacts(
       const fB = Math.max(0, overlapFrac(fx.rB, rc, dist) - fA);
       const fC = Math.max(0, overlapFrac(fx.rC, rc, dist) - fA - fB);
       expFrac = fA + fB + fC;
-      lethal = fA * 1 + fB * 0.5 + fC * 0.04;
+      lethal = fA * 1 + fB * 0.7 + fC * 0.1;
       zone = fA > 0.001 ? 'A' : fB > 0.001 ? 'B' : fC > 0.001 ? 'C' : null;
     }
     if (!zone) continue;
     const evac = evacFraction(evacStart.get(city.id), sc.leadYears);
+    const shelter = shelterFraction(shelterStart.get(city.id), sc.leadYears);
     const exp = city.popM * expFrac;
-    const dth = city.popM * lethal * (1 - evac);
-    rows.push({ city, distKm: dist, zone, exposedM: exp, deathsM: dth, evac });
+    const dth = city.popM * lethal * (1 - evac) * (1 - shelter);
+    rows.push({ city, distKm: dist, zone, exposedM: exp, deathsM: dth, evac, shelter });
     deaths += dth;
     exposed += exp;
+  }
+  // away from the big cities there are still people: roughly 25 per square kilometre on land (almost none in the polar regions)
+  if (!ocean) {
+    const dens = Math.abs(site.lat) > 65 ? 1 : 25;
+    const area = Math.PI * (fx.rA ** 2 * 1 + (fx.rB ** 2 - fx.rA ** 2) * 0.7 + (fx.rC ** 2 - fx.rB ** 2) * 0.1);
+    const rural = (dens * area) / 1e6;
+    deaths += rural;
+    exposed += (dens * Math.PI * fx.rC ** 2) / 1e6;
   }
   rows.sort((a, b) => b.exposedM - a.exposedM);
   return { rows, deathsM: deaths, exposedM: exposed, ocean };
@@ -472,12 +536,18 @@ export function cityRisk(sc: Scenario, corridor: Corridor, isLand: (lat: number,
 }
 
 /** Schedule helpers used by the UI. */
-export function kineticPlan(sc: Scenario, tier: KineticTier, now: number) {
+export function kineticPlan(sc: Scenario, tier: KineticTier, now: number, betaKnown = false) {
   const interceptT = now + sc.cruiseYears;
   const remainingYears = sc.leadYears - interceptT;
   if (remainingYears <= 0.02) return { feasible: false as const, interceptT, remainingYears, expectedR: 0 };
   const m = KINETIC[tier].massKg;
-  return { feasible: true as const, interceptT, remainingYears, expectedR: deflectionR(sc, m, NOMINAL_BETA, remainingYears) };
+  return { feasible: true as const, interceptT, remainingYears, expectedR: deflectionR(sc, m, betaKnown ? sc.beta : NOMINAL_BETA, remainingYears) };
+}
+
+export function probePlan(sc: Scenario, now: number) {
+  const arriveT = now + sc.cruiseYears * PROBE.cruiseFactor;
+  const feasible = sc.leadYears - arriveT > 0.35;
+  return { feasible, arriveT };
 }
 
 export function tractorPlan(sc: Scenario, now: number) {
@@ -507,6 +577,8 @@ export interface ScenarioInput {
   difficulty: 'easy' | 'standard' | 'hard';
   startISO?: string;
   forceHit?: boolean;
+  budgetB?: number;
+  daily?: string;
 }
 
 export function makeScenario(inp: ScenarioInput): Scenario {
@@ -516,13 +588,13 @@ export function makeScenario(inp: ScenarioInput): Scenario {
   const vInf = Math.max(3.5, inp.vInf);
   const vImpact = Math.sqrt(vInf * vInf + V_ESC * V_ESC);
   const bImp = bImpactRadius(vInf);
-  const willHit = inp.forceHit ?? rng() < 0.62;
+  const willHit = inp.forceHit ?? rng() < 0.9;
   const th = rng() * Math.PI;
   // Initial estimate sits near the Earth centre: early orbit fits cannot tell where in the corridor the truth lies.
   const e0r = bImp * (0.15 + rng() * 0.8);
   const e0a = rng() * Math.PI * 2;
   const est0 = { xi: e0r * Math.cos(e0a), zeta: e0r * Math.sin(e0a), tau: 0 };
-  const targetP = inp.difficulty === 'easy' ? 1 / 120 : inp.difficulty === 'hard' ? 1 / 600 : 1 / 300;
+  const targetP = inp.difficulty === 'easy' ? 1 / 6 : inp.difficulty === 'hard' ? 1 / 16 : 1 / 10;
   const sXi0 = bImp * (0.22 + rng() * 0.16);
   // Solve sigma_zeta so the initial impact probability matches the briefing.
   let lo = 2, hi = 500;
@@ -543,6 +615,10 @@ export function makeScenario(inp: ScenarioInput): Scenario {
   }
   const sZ0 = Math.sqrt(lo * hi);
   const sTau0 = Math.min(4.5, 0.05 * sZ0 + 0.3);
+  // the answer should only become clear late in the round, whatever the starting spread
+  const sureFrac = inp.difficulty === 'easy' ? 0.8 : inp.difficulty === 'hard' ? 0.9 : 0.86;
+  const ratio = Math.max(1e-6, Math.min(0.95, (0.6 * bImp) / sZ0));
+  const shapeP = Math.max(1.2, Math.min(4, Math.log(ratio) / Math.log(1 - sureFrac)));
   // The truth is a draw from that same posterior, conditioned on hit / miss, so the estimate is honest.
   let truth0 = { xi: 0, zeta: 0, tau: 0 };
   let found = false;
@@ -561,7 +637,7 @@ export function makeScenario(inp: ScenarioInput): Scenario {
   const radiantLon = (rng() - 0.5) * 360;
   const draftSc = { bImp, radiant: { lat: radiantLat, lon: radiantLon, theta: th } } as Scenario;
   truth0.tau = (rng() - 0.5) * 12;
-  if (willHit && rng() < 0.85) {
+  if (willHit) {
     const cand: { xi: number; zeta: number; lat: number; lon: number }[] = [];
     for (let k = 0; k < 4000; k++) {
       const r = bImp * 0.9 * Math.sqrt(rng()), a = rng() * Math.PI * 2;
@@ -602,16 +678,18 @@ export function makeScenario(inp: ScenarioInput): Scenario {
     truth0, est0,
     sigma0: { xi: sXi0, zeta: sZ0, tau: sTau0 },
     sigmaFloor: { xi: 0.012, zeta: 0.03, tau: 0.002 },
-    radiant: { lat: radiantLat, lon: radiantLon, theta: th },
+    radiant: { lat: draftSc.radiant.lat, lon: draftSc.radiant.lon, theta: th },
     beta: 1.6 + rng() * 2.2,
     geom: 0.7 + rng() * 0.5,
+    shapeP,
     cruiseYears: cruise,
     seed: inp.seed,
     orbit: inp.orbit,
     facts: inp.facts ?? [],
     difficulty: inp.difficulty,
     startISO: inp.startISO ?? new Date().toISOString().slice(0, 10),
-    budgetB: inp.difficulty === 'easy' ? 4.5 : inp.difficulty === 'hard' ? 2.8 : 3.5,
+    budgetB: inp.budgetB ?? (inp.difficulty === 'easy' ? 4.5 : inp.difficulty === 'hard' ? 2.8 : 3.5),
+    daily: inp.daily,
   };
 }
 
@@ -620,6 +698,10 @@ export function makeScenario(inp: ScenarioInput): Scenario {
 export interface Outcome {
   hit: boolean;
   bFinal: number;
+  finalPos: { xi: number; zeta: number; tau: number };
+  basePos: { xi: number; zeta: number; tau: number };
+  fragmented: boolean;
+  deflected: boolean;
   missKm: number;
   site: { lat: number; lon: number } | null;
   effects: Effects;
@@ -629,7 +711,7 @@ export interface Outcome {
   baselineDeathsM: number;
   baselineHit: boolean;
   spentB: number;
-  score: { total: number; lives: number; thrift: number; prudence: number; grade: string };
+  score: { total: number; lives: number; thrift: number; prudence: number; nuke: number; grade: string };
   wastedEvac: string[];
 }
 
@@ -641,11 +723,17 @@ export function resolve(
   const applied = computeApplied(sc, decs);
   const tr = currentTruth(sc, applied, sc.leadYears);
   const bFinal = Math.hypot(tr.xi, tr.zeta);
-  const hit = bFinal < sc.bImp;
+  // pieces of a broken asteroid land over a wider area, each far weaker
+  const fragmented = decs.some((d) => d.kind === 'nuke' && d.detonateT! < sc.leadYears - 0.005);
+  const spread = fragmented ? 1.7 : 1;
+  const hit = bFinal < sc.bImp * spread;
   const evacStart = new Map<string, number>();
-  for (const d of decs) if (d.kind === 'evac') evacStart.set(d.cityId!, d.t);
-  const fx = impactEffects(sc);
+  const shelterStart = new Map<string, number>();
+  for (const d of decs) if (d.kind === 'evac') (d.mode === 'shelter' ? shelterStart : evacStart).set(d.cityId!, d.t);
   const baseHit = Math.hypot(sc.truth0.xi, sc.truth0.zeta) < sc.bImp;
+  const fragSc: Scenario = fragmented ? { ...sc, diameterM: sc.diameterM * 0.55, massKg: sc.massKg * 0.55 ** 3 } : sc;
+  const fx = impactEffects(fragSc);
+  const sizePenalty = 1 + Math.max(0, (sc.diameterM - 150) / 300);
   let baselineDeaths = 0;
   if (baseHit) {
     const g = groundPoint(sc, sc.truth0.xi, sc.truth0.zeta, sc.truth0.tau);
@@ -656,15 +744,20 @@ export function resolve(
   let deaths = 0, ocean = false;
   if (hit) {
     site = groundPoint(sc, tr.xi, tr.zeta, sc.truth0.tau);
-    const ci = cityImpacts(sc, site, isLand, evacStart);
-    rows = ci.rows; deaths = ci.deathsM; ocean = ci.ocean;
+    const ci = cityImpacts(fragSc, site, isLand, evacStart, shelterStart);
+    rows = ci.rows; ocean = ci.ocean;
+    // fewer people die if the asteroid shattered, but only if the pieces mostly miss the cities
+    const factor = fragmented ? (bFinal < sc.bImp ? 0.34 : 0.14) * sizePenalty * 1.5 : 1;
+    deaths = ci.deathsM * Math.min(1, factor);
+    if (fragmented) rows = rows.map((r) => ({ ...r, deathsM: r.deathsM * Math.min(1, factor) }));
   }
   const spent = decs.reduce((s, d) => s + d.costB, 0);
   // Evacuations ordered for cities that were never in a damage zone.
   const wasted: string[] = [];
   const hitCities = new Set(rows.map((r) => r.city.id));
-  for (const [id] of evacStart) if (!hitCities.has(id)) wasted.push(id);
-  const nEvac = evacStart.size;
+  const protectedIds = new Set([...evacStart.keys(), ...shelterStart.keys()]);
+  for (const id of protectedIds) if (!hitCities.has(id)) wasted.push(id);
+  const nEvac = protectedIds.size;
 
   let lives: number;
   if (baseHit) {
@@ -676,12 +769,16 @@ export function resolve(
   }
   const thrift = 250 * Math.max(0, 1 - spent / sc.budgetB);
   const prudence = nEvac === 0 ? 150 : 150 * (1 - Math.min(1, wasted.length / Math.max(1, nEvac)));
-  const total = Math.round(lives + thrift + prudence);
+  // a nuclear burst is a last resort: using one when other options were open, or on a rock that would miss, costs you
+  const nukeDec = decs.find((d) => d.kind === 'nuke');
+  const earlyNuke = nukeDec ? sc.leadYears - nukeDec.t > sc.cruiseYears + 0.9 : false;
+  const nukePenalty = nukeDec ? (!baseHit ? 220 : earlyNuke ? 150 : 40) : 0;
+  const total = Math.max(0, Math.round(lives + thrift + prudence - nukePenalty));
   const grade = total >= 900 ? 'S' : total >= 780 ? 'A' : total >= 620 ? 'B' : total >= 450 ? 'C' : total >= 250 ? 'D' : 'F';
   return {
-    hit, bFinal, missKm: bFinal * R_EARTH_KM, site, effects: fx, ocean, rows,
+    hit, bFinal, finalPos: { xi: tr.xi, zeta: tr.zeta, tau: sc.truth0.tau }, basePos: { xi: sc.truth0.xi, zeta: sc.truth0.zeta, tau: sc.truth0.tau }, fragmented, deflected: baseHit && !hit, missKm: bFinal * R_EARTH_KM, site, effects: fx, ocean, rows,
     deathsM: deaths, baselineDeathsM: baselineDeaths, baselineHit: baseHit, spentB: spent,
-    score: { total, lives: Math.round(lives), thrift: Math.round(thrift), prudence: Math.round(prudence), grade },
+    score: { total, lives: Math.round(lives), thrift: Math.round(thrift), prudence: Math.round(prudence), nuke: Math.round(nukePenalty), grade },
     wastedEvac: wasted,
   };
 }
@@ -695,7 +792,7 @@ export function oneInN(p: number): string {
 
 /** Lead time at which `nImpactors` standard impactors launched promptly just manage to deflect a typical case. */
 export function suggestLead(diameterM: number, vInf: number, difficulty: 'easy' | 'standard' | 'hard', rho = 2000): number {
-  const nReq = difficulty === 'easy' ? 1.4 : difficulty === 'hard' ? 3.2 : 2.2;
+  const nReq = difficulty === 'easy' ? 1.4 : difficulty === 'hard' ? 1.35 : 2.0;
   const mass = massFromDiameter(diameterM, rho);
   const b = bImpactRadius(vInf);
   const need = 0.95 * b;
@@ -708,4 +805,74 @@ export function suggestLead(diameterM: number, vInf: number, difficulty: 'easy' 
     if (R * nReq >= need) return lead;
   }
   return 16;
+}
+
+/** How much a funded observation would shrink the uncertainty compared with doing nothing, same date. */
+export function obsEffect(sc: Scenario, decs: Decision[], t: number, o: { bonusYears: number; durYears: number }): number {
+  const dec: Decision = { id: 'preview', kind: 'obs', t, costB: 0, label: '', bonusYears: o.bonusYears, durYears: o.durYears };
+  const when = Math.min(sc.leadYears - 0.01, t + o.durYears);
+  const without = remaining(sc, decs, when);
+  const withIt = remaining(sc, [...decs, dec], when);
+  return without > 1e-9 ? Math.max(0.02, Math.min(1, withIt / without)) : 1;
+}
+
+/** Where the estimate would sit if a push of `pushRe` Earth radii were applied now (nominal result, away from Earth). */
+export function pushShift(state: State, pushRe: number): [number, number] {
+  const m = Math.hypot(state.center.xi, state.center.zeta);
+  const d: [number, number] = m < 1e-9 ? [1, 0] : [state.center.xi / m, state.center.zeta / m];
+  return [d[0] * pushRe, d[1] * pushRe];
+}
+
+export function diskNormals(sc: Scenario) {
+  const d = disk(sc.seed);
+  return { zx: d.zx, zz: d.zz };
+}
+
+/** First time the picture is sharp enough that the answer (hit or miss) is clear. */
+export function certaintyTime(sc: Scenario, decs: Decision[], from: number): number {
+  const lim = 0.6 * sc.bImp;
+  for (let t = from; t < sc.leadYears; t += 1 / 24) {
+    const f = remaining(sc, decs, t);
+    if (sigmaAt(sc, f).zeta < lim) return t;
+  }
+  return sc.leadYears;
+}
+
+/** Latest launch date for a spacecraft that still has time to arrive and push. */
+export function lastLaunchTime(sc: Scenario): number {
+  return Math.max(0, sc.leadYears - sc.cruiseYears - 0.15);
+}
+
+/**
+ * Impact chance if a push of `pushRe` Earth radii is applied at `interceptT`, using what the team
+ * can know today: draw possible truths from the current picture, let the spacecraft pick its
+ * direction from the sharper picture it will have on arrival, and count what still hits.
+ */
+export function riskWithPush(sc: Scenario, decs: Decision[], t: number, applied: Applied[], pushRe: number, interceptT: number): { before: number; after: number } {
+  const f = remaining(sc, decs, t);
+  const est = estimateAt(sc, decs, applied, t);
+  const sg = sigmaAt(sc, f);
+  const sI = sigmaAt(sc, remaining(sc, decs, Math.min(interceptT, sc.leadYears - 0.001)));
+  const sXi = Math.hypot(sg.xi, est.extra * 0.6), sZ = Math.hypot(sg.zeta, est.extra);
+  const R = sc.bImp + pushRe + 0.3;
+  const N = 3600;
+  const d = disk(sc.seed);
+  const area = (Math.PI * R * R) / N;
+  const peak = 1 / (2 * Math.PI * sXi * sZ);
+  let before = 0, after = 0;
+  for (let i = 0; i < N; i++) {
+    const r = Math.sqrt((i + 0.5) / N) * R, a = i * GOLDEN;
+    const xi = r * Math.cos(a), zeta = r * Math.sin(a);
+    const w = peak * Math.exp(-0.5 * (((xi - est.xi) / sXi) ** 2 + ((zeta - est.zeta) / sZ) ** 2)) * area;
+    if (xi * xi + zeta * zeta < sc.bImp * sc.bImp) before += w;
+    const dir = unit(xi + d.zx[i % SAMPLES] * sI.xi, zeta + d.zz[i % SAMPLES] * sI.zeta);
+    const qx = xi + dir[0] * pushRe, qz = zeta + dir[1] * pushRe;
+    if (qx * qx + qz * qz < sc.bImp * sc.bImp) after += w;
+  }
+  return { before, after };
+}
+
+export function nukePlan(sc: Scenario, now: number) {
+  const detonateT = now + sc.cruiseYears * NUKE.cruiseFactor;
+  return { feasible: detonateT < sc.leadYears - 0.03, detonateT, remainingYears: sc.leadYears - detonateT };
 }

@@ -2,5 +2,6 @@
   "name": "asteroid-defense-dev",
   "main": "worker/index.ts",
   "compatibility_date": "2026-04-01",
+  "d1_databases": [{ "binding": "DB", "database_name": "dontlookup-daily", "database_id": "4f734654-ec2a-4bd3-9ae4-e9d1efe6693a" }],
   "assets": { "directory": "./dist", "binding": "ASSETS", "not_found_handling": "single-page-application", "run_worker_first": ["/api/*"] }
 }

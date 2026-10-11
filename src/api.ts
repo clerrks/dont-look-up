@@ -1,4 +1,5 @@
 import type { Elements } from './sim/orbit';
+import type { ActionLog } from './game';
 import { FALLBACK_CATALOG } from './data/fallback';
 
 export interface Approach { date: string; distKm: number; vRel?: number; vInf?: number }
@@ -70,6 +71,33 @@ export async function postAI(path: string, body: unknown): Promise<{ text: strin
     if (r.status === 429) return { text: j.text ?? 'The advisor is busy. Try again shortly.', provider: 'rate-limited' };
     if (!r.ok) return null;
     return j;
+  } catch {
+    return null;
+  }
+}
+
+// ---- Daily Challenge leaderboard (Cloudflare D1 behind the Worker)
+
+export interface BoardRow { id: number; name: string; score: number; grade: string; hit: number; spent: number }
+export interface Board { day: string; today?: string; budgetB?: number; top: BoardRow[]; total: number; unavailable?: boolean }
+export interface DailyRun { id: number; day: string; name: string; score: number; grade: string; hit: boolean; spent: number; actions: ActionLog[] }
+export interface SubmitResult { ok: boolean; id: number; rank: number; total: number; best: number; improved: boolean; board: Board }
+
+export async function fetchBoard(day?: string): Promise<Board | null> {
+  try { return await getJson<Board>(`/api/daily/board${day ? `?day=${day}` : ''}`, 8000); } catch { return null; }
+}
+
+export async function fetchRun(id: number): Promise<DailyRun | null> {
+  try { return await getJson<DailyRun>(`/api/daily/run?id=${id}`, 8000); } catch { return null; }
+}
+
+export async function submitRun(body: {
+  day: string; name: string; score: number; grade: string; lives: number; thrift: number; prudence: number; spent: number; hit: boolean; actions: ActionLog[];
+}): Promise<SubmitResult | null> {
+  try {
+    const r = await fetch('/api/daily/submit', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    if (!r.ok) return null;
+    return (await r.json()) as SubmitResult;
   } catch {
     return null;
   }

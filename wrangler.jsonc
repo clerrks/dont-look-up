@@ -9,6 +9,9 @@
     "run_worker_first": ["/api/*"]
   },
   "ai": { "binding": "AI" },
-  "routes": [{ "pattern": "ad.chiefkeef.org", "custom_domain": true }],
+  "d1_databases": [
+    { "binding": "DB", "database_name": "dontlookup-daily", "database_id": "4f734654-ec2a-4bd3-9ae4-e9d1efe6693a" }
+  ],
+  "routes": [{ "pattern": "dontlookup.cc", "custom_domain": true }],
   "observability": { "enabled": true }
 }

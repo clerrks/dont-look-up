@@ -26,15 +26,27 @@ function land() {
   return landGeo;
 }
 
-function tracePolygons(ctx: CanvasRenderingContext2D, W: number, H: number) {
+/** Land as plain rings of [lon, lat]: used for the reconstructed world of 66 million years ago. */
+export type LandRings = number[][][];
+
+function ringList(rings?: LandRings): number[][][] {
+  if (rings) return rings;
   const geo = land();
   const feats = geo.type === 'FeatureCollection' ? geo.features : [geo];
-  ctx.beginPath();
+  const out: number[][][] = [];
   for (const f of feats) {
     const g = f.geometry;
     const polys = g.type === 'Polygon' ? [g.coordinates] : g.coordinates;
-    for (const poly of polys) {
-      for (const ring of poly) {
+    for (const poly of polys) for (const ring of poly) out.push(ring);
+  }
+  return out;
+}
+
+function tracePolygons(ctx: CanvasRenderingContext2D, W: number, H: number, rings?: LandRings) {
+  ctx.beginPath();
+  {
+    {
+      for (const ring of ringList(rings)) {
         // unwrap longitudes so rings crossing the antimeridian do not smear a line across the map
         const lons: number[] = [];
         let prev = ring[0][0], off = 0;
@@ -64,7 +76,7 @@ export interface Palette {
   grid: string;
 }
 
-export function paintEarth(W: number, H: number, pal: Palette): HTMLCanvasElement {
+export function paintEarth(W: number, H: number, pal: Palette, rings?: LandRings): HTMLCanvasElement {
   const cv = document.createElement('canvas');
   cv.width = W; cv.height = H;
   const ctx = cv.getContext('2d')!;
@@ -77,19 +89,22 @@ export function paintEarth(W: number, H: number, pal: Palette): HTMLCanvasElemen
   for (let lon = -180; lon <= 180; lon += 15) { const x = ((lon + 180) / 360) * W; ctx.moveTo(x, 0); ctx.lineTo(x, H); }
   for (let lat = -75; lat <= 75; lat += 15) { const y = ((90 - lat) / 180) * H; ctx.moveTo(0, y); ctx.lineTo(W, y); }
   ctx.stroke();
-  tracePolygons(ctx, W, H);
+  tracePolygons(ctx, W, H, rings);
   ctx.fillStyle = pal.land; ctx.fill();
   ctx.strokeStyle = pal.coast; ctx.lineWidth = Math.max(1, W / 1400); ctx.stroke();
+  // the polar caps: no gap at the poles
+  ctx.fillStyle = pal.land;
+  ctx.fillRect(0, Math.floor(H * 0.975), W, H);
   return cv;
 }
 
-export function makeLandMask(): (lat: number, lon: number) => boolean {
+export function makeLandMask(rings?: LandRings): (lat: number, lon: number) => boolean {
   const W = 1440, H = 720;
   const cv = document.createElement('canvas');
   cv.width = W; cv.height = H;
   const ctx = cv.getContext('2d', { willReadFrequently: true })!;
   ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
-  tracePolygons(ctx, W, H);
+  tracePolygons(ctx, W, H, rings);
   ctx.fillStyle = '#fff'; ctx.fill();
   const data = ctx.getImageData(0, 0, W, H).data;
   return (lat, lon) => {

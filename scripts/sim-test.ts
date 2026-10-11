@@ -37,3 +37,59 @@ run(14, 300, 10, true, 'D');
 run(15, 140, 7, false, 'E(miss)');
 import { suggestLead } from '../src/sim/model';
 for (const D of [30, 60, 100, 140, 200, 300]) console.log('lead for', D, suggestLead(D, 6, 'easy'), suggestLead(D, 6, 'standard'), suggestLead(D, 6, 'hard'));
+import { riskWithPush, certaintyTime, lastLaunchTime, computeApplied } from '../src/sim/model';
+{
+  const sc = makeScenario({ name: 'T', designation: 'T', kind: 'whatif', diameterM: 120, diameterNote: '', vInf: 8, leadYears: 7, seed: 21, difficulty: 'standard', forceHit: true });
+  const ap = computeApplied(sc, []);
+  for (const t of [0, 1, 2, 3, 4]) {
+    const kp = kineticPlan(sc, 'standard', t);
+    if (!kp.feasible) continue;
+    const r = riskWithPush(sc, [], t, ap, kp.expectedR, kp.interceptT);
+    console.log('t', t, 'push', kp.expectedR.toFixed(2), 'before', oneInN(r.before), 'after', oneInN(r.after));
+  }
+  console.log('sure by', certaintyTime(sc, [], 0).toFixed(2), 'last launch', lastLaunchTime(sc).toFixed(2));
+}
+
+// ---- winnability: a sensible player (telescopes first, then launch once the risk cut is large)
+import { OBS, OBS as _o, riskWithPush as rwp, KINETIC as K, computeApplied as ca } from '../src/sim/model';
+function play(seed: number, diff: 'easy' | 'standard' | 'hard', D: number, lead: number, telescopes: boolean) {
+  const sc = makeScenario({ name: 'T', designation: 'T', kind: 'whatif', diameterM: D, diameterNote: '', vInf: 9, leadYears: lead, seed, difficulty: diff, forceHit: true });
+  const decs: Decision[] = [];
+  let budget = sc.budgetB, n = 0;
+  if (telescopes) for (const k of ['space', 'ground', 'space'] as const) { const o = OBS[k]; if (budget >= o.costB && decs.filter((d) => d.kind === 'obs').reduce((s, d) => s + (d.bonusYears ?? 0), 0) + o.bonusYears <= 2) { decs.push({ id: 'o' + decs.length, kind: 'obs', t: 0, costB: o.costB, label: '', bonusYears: o.bonusYears, durYears: o.durYears }); budget -= o.costB; } }
+  for (let t = 0; t < lead - 0.2; t += 1 / 12) {
+    const kp = kineticPlan(sc, 'standard', t);
+    if (!kp.feasible || budget < K.standard.costB || n >= 4) continue;
+    const ap = ca(sc, decs);
+    const r = rwp(sc, decs, t, ap, kp.expectedR, kp.interceptT);
+    if (r.before > 0.12 && r.after < 0.6 * r.before) { decs.push({ id: 'k' + decs.length, kind: 'kinetic', t, costB: K.standard.costB, label: '', tier: 'standard', interceptT: kp.interceptT }); budget -= K.standard.costB; n++; }
+  }
+  const r = resolve(sc, decs, land);
+  return { saved: !r.hit, impactors: n, spent: r.spentB };
+}
+for (const diff of ['easy', 'standard', 'hard'] as const) {
+  const D = diff === 'easy' ? 90 : diff === 'standard' ? 120 : 150;
+  for (const tele of [false, true]) {
+    let saved = 0, tot = 40, imp = 0;
+    for (let s = 1; s <= tot; s++) {
+      const lead = suggestLead(D, 9, diff);
+      const r = play(s * 7 + 3, diff, D, lead, tele);
+      saved += r.saved ? 1 : 0; imp += r.impactors;
+    }
+    console.log(diff, 'D', D, 'telescopes', tele, 'saved', saved + '/' + tot, 'avg impactors', (imp / tot).toFixed(1));
+  }
+}
+
+// ---- no-action outcomes with the default hit rate
+for (const diff of ['easy', 'standard', 'hard'] as const) {
+  let hits = 0, killed = 0, ocean = 0, deaths = 0, n = 300;
+  for (let s = 1; s <= n; s++) {
+    const D = diff === 'easy' ? 80 : diff === 'standard' ? 120 : 150;
+    const sc = makeScenario({ name: 'T', designation: 'T', kind: 'whatif', diameterM: D, diameterNote: '', vInf: 5 + (s % 12), leadYears: suggestLead(D, 9, diff), seed: s * 13 + 5, difficulty: diff });
+    // land mask stand-in: treat latitudes within the tropics/mid-latitudes over a few longitudes as land (rough 30% land)
+    const isLand = (lat: number, lon: number) => ((Math.floor((lon + 180) / 40) + Math.floor((lat + 90) / 30)) % 3) === 0;
+    const r = resolve(sc, [], isLand);
+    if (r.hit) hits++; if (r.hit && r.deathsM > 0.05) killed++; if (r.hit && r.ocean) ocean++; deaths += r.deathsM;
+  }
+  console.log(diff, 'no action: hit', Math.round((hits / n) * 100) + '%', 'deadly', Math.round((killed / n) * 100) + '%', 'ocean', Math.round((ocean / n) * 100) + '%', 'avg deaths M', (deaths / n).toFixed(1));
+}

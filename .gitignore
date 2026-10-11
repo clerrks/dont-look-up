@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.wrangler/
+.claude/
+.dev.vars
+.env*
+*.log
+# the original purchased model pack: only the models the game uses are kept (public/models)
+space-3d-models-pack/
+# the same recordings live in public/audio
+voicelines/
